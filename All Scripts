@@ -1,0 +1,490 @@
+##############################
+####RSCRIPTS#########################
+####randomForestSDM#########
+########################
+#################
+setwd("D:/Argonne/SDM/Predictors/Current")
+
+library(raster)
+library(rgdal)
+library(dismo)
+library(randomForest)
+library(maptools)
+library(sp)
+envpredict=Sys.glob("*.tif")
+stck=stack()
+for(i in 1:NROW(envpredict)){
+  tempraster = raster(envpredict[i])
+  stck=stack(stck,tempraster)
+}
+plot(stck,9)#trivial number, may have too many env factors
+rcw=read.csv("rcw_wgs2.csv")
+head(rcw)
+
+points(rcw,col='blue')
+abs = read.csv("rcw_absent_wgs.csv")
+abs1=abs[,-1]
+points(abs1, col='black')
+#Combine presence and absence data
+rcw_presence <- extract(stck, rcw)
+rcw_absence <- extract(stck, abs1)
+head(rcw_absence)
+pb=c(rep(1, nrow(rcw_presence)), rep(0, nrow(rcw_absence)))
+sdmdata <- data.frame(cbind(pb, rbind(rcw_presence, rcw_absence)))
+head(sdmdata)
+sdmdata=na.omit(sdmdata)
+summary(sdmdata)
+
+write.csv(sdmdata, "RCW_PA_Data.csv")
+
+
+#######
+# NOW SPLIT DATA INTO TRAINING AND TESTING
+#######
+library (caret)
+
+set.seed(1) #pseudo-repeatability
+trainIndex = createDataPartition(sdmdata$pb, p = 0.75,
+                                 list = FALSE, times = 1) #y as basis of splitting 
+training = sdmdata[ trainIndex,] #75% data for model training
+testing = sdmdata[-trainIndex,] #25% data for model testing
+
+tail(training)
+#
+#
+#----------------------------
+# RANDOM FOREST
+#----------------------------
+set.seed(1) #pseudo-repeatability
+trainIndex = createDataPartition(sdmdata$pb, p = 0.75,
+                                 list = FALSE, times = 1) #y as basis of splitting 
+training = sdmdata[ trainIndex,] #75% data for model training
+testing = sdmdata[-trainIndex,] #25% data for model testing
+
+tail(training)
+
+set.seed(825)
+library(caret)
+#define train control --> 10 fold cv
+train_control = trainControl(method="cv", number=10)
+
+mod_fit = train(pb~.,data=training,trControl=train_control, method="rf", importance=TRUE)
+
+summary(mod_fit)
+varImp(mod_fit)
+varimpt=varImp(mod_fit)
+plot(varimpt, main='Variable Importance')
+##test the RF model
+p1 = predict(mod_fit, newdata=testing) #predict on the test data
+#
+#Develop AUC Curve for RF Model
+library(pROC)
+roc = pROC::roc(testing[,"pb"], p1) #compare testing data with predicted responses
+auc = pROC::auc(roc)
+plot(roc, main="Area Under the Curve")
+text(0.5,0.5, paste("AUC = ", format(auc, digits=5, scientific=FALSE)))
+#
+##Build the RF SDM Map
+require(raster)
+datafiles = Sys.glob("*.tif")
+datafiles #list of predictors
+stck = stack() #create empty raster stack for storing rasters
+for(i in 1:NROW(datafiles)){
+  tempraster=raster(datafiles[i])
+  stck=stack(stck,tempraster)
+}
+p = predict(stck, mod_fit) #use predict to implement the RF Model on raster data
+plot(p, main="RF Predictive Map")
+
+#####FUTURE
+setwd("D:/Argonne/SDM/Predictors/Future/Future3b")
+require(raster)
+datafilesfut = Sys.glob("*.tif")
+datafilesfut #list of predictors
+stckF = stack() #create empty raster stack for storing rasters
+for(i in 1:NROW(datafilesfut)){
+  tempraster2=raster(datafilesfut[i])
+  stckF=stack(stckF,tempraster2)
+}
+p2 = predict(stckF, mod_fit) #use predict to implement the RF Model on raster data
+plot(p2, main="RF Predictive Map Future3b")
+writeRaster(p2,"rcw_RFFut3b.tif") #written to that working directory
+
+
+######################################################
+#######################################sdms############
+################MAXENT#################################
+#######################################################
+#########################################################
+setwd("D:/Argonne/SDM/Predictors/Current")
+library(dismo)
+library(rJava)
+library(raster)
+library(rgdal)
+library(ggplot2)
+library(foreign)
+rcw=read.csv("rcw_wgs2.csv")
+head(rcw)
+envpredict=Sys.glob("*.tif")
+stck=stack()
+for(i in 1:NROW(envpredict)){
+  tempraster = raster(envpredict[i])
+  stck=stack(stck,tempraster)
+}
+na.omit(rcw)
+## lines 12-15 is one command
+stck #raster predictors as a stackplot
+plot(stck,4) #can go up to (plot(stck,5))
+head(rcw) 
+points(rcw,col='blue') #try to plot points didn't work
+group=kfold(rcw, 5) #split the data into 5 portions, test model on all 5
+rcw_train = rcw[group !=1, ]
+rcw_test = rcw[group == 1, ]
+xm = maxent(stck, rcw_train)
+plot(xm) #variable importance
+#Error message
+
+
+ext = extent(-93.5706589928,-75.01666526,23.5209528152,38.6080847708) #seUS
+# 1000 background data points
+backg = randomPoints(stck, n=1000,ext=ext, extf = 1.25)
+colnames(backg) = c('long', 'lat')
+group = kfold(backg, 5)
+
+#pseudo-absences for training model performances
+backg_train = backg[group != 1, ]
+backg_test = backg[group == 1, ]
+
+e = evaluate(rcw_test, backg_test, xm, stck)
+e
+plot(e, "ROC")
+
+p= predict(stck, xm, ext=ext, progress='')
+
+#0ñ1 scale where 1 indicates the most suitable habitat 
+#and 0 least suitable habitat 
+
+par(mfrow=c(1,2))
+
+
+
+plot(p, main='Maxent Present Model')
+writeRaster(p, "RCW_ME.tif")
+#FUTURE
+setwd("D:/Argonne/SDM/Predictors/Future/Future3b")
+require(raster)
+datafilesfut = Sys.glob("*.tif")
+datafilesfut #list of predictors
+stckF = stack() #create empty raster stack for storing rasters
+for(i in 1:NROW(datafilesfut)){
+  tempraster2=raster(datafilesfut[i])
+  stckF=stack(stckF,tempraster2)
+}
+
+
+ #auc of .908, bio_08 and conifer both important
+p2=predict(stckF,xm)
+plot(p2, main="ME Predictive Map Future 3b")
+writeRaster(p2,"rcw_MEFut3b.tif")
+
+#################################################
+################alterations#####################################
+#############################################################################
+########things like avg of raster####### convert to binary####### overlay###########
+###################################################################################
+
+####### Calculating mean of all rasters
+setwd("D:/Argonne/SDM/Results/Red Cockaded Woodpecker/Final/current")
+
+futurerast=Sys.glob("*.tif")
+stckA=stack()
+for(i in 1:NROW(futurerast)){
+  temprasterA = raster(futurerast[i])
+  stckA=stack(stckA,temprasterA)
+}
+mean <- calc(stckA, fun=mean)
+plot(mean, main="SS Mean of ME and RF Current")
+writeRaster(mean, "RFMEAvgCurrentSS.tif")
+ ####
+
+##CORRELATION
+setwd("D:/Argonne/SDM/Predictors/Current")
+
+library(raster)
+library(rgdal)
+library(dismo)
+library(randomForest)
+library(maptools)
+library(sp)
+envpredict=Sys.glob("*.tif")
+stck=stack()
+for(i in 1:NROW(envpredict)){
+  tempraster = raster(envpredict[i])
+  stck=stack(stck,tempraster)
+}
+plot(stck,9)#trivial number, may have too many env factors
+skunk=read.csv("SkunkOccurrences.csv")
+head(skunk)
+
+points(skunk,col='blue')
+abs = read.csv("rcw_absent_wgs.csv")
+abs1=abs[,-1]
+points(abs1, col='black')
+#Combine presence and absence data
+skunk_presence <- extract(stck, skunk)
+skunk_absence <- extract(stck, abs1)
+head(skunk_absence)
+pb=c(rep(1, nrow(skunk_presence)), rep(0, nrow(skunk_absence)))
+sdmdata <- data.frame(cbind(pb, rbind(skunk_presence, skunk_absence)))
+head(sdmdata)
+sdmdata=na.omit(sdmdata)
+summary(sdmdata)
+presence = subset(sdmdata, sdmdata$pb == 1)#subset to only include presence locations
+presence <- na.omit(presence)#delete NA values
+pred_corr <- cor(presence, method='pearson', use='complete.obs')#this is the correlation matrix
+write.csv(pred_corr, "Predictor_Correlation2.csv")#export corr matrix to csv
+
+
+#################RECLASSIFICATION ---- BINARY
+setwd("D:/Argonne/SDM/Results/To Upload To Box")
+m <- c(0, 0.49999999999, 0,  0.5, 1.0, 1)
+meavg <- raster("RFMEAvgCurrentRCW.tif")
+rclmat <- matrix(m, ncol=3, byrow=TRUE)
+binary <- reclassify(meavg, rclmat)
+plot(binary, main="Future RFME SS Binary")
+writeRaster(binary, "binaryRFMECurrentRCW.tif")
+
+###RF version
+setwd("D:/Argonne/SDM/Results/Spotted Skunk/Future/RF/1")
+rfavg <- raster("RFMEAvgFutureRCW.tif")####"RCWFutureAveragesNew.tif"
+m <- c(0, 0.49999999999, 0,  0.5, 1.0, 1)
+rclmat <- matrix(m, ncol=3, byrow=TRUE)
+binaryRF <- reclassify(mean, rclmat)
+plot(binaryRF, main="MERF CombinedRCW")
+writeRaster(binaryRF, "BinaryMERF RCW.tif")
+
+
+#####Subtractions
+setwd("D:/Argonne/SDM/Results/Red Cockaded Woodpecker/current/RF")
+rfcurrent <- raster("binaryRFcurrent.tif")
+setwd("D:/Argonne/SDM/Results/Red Cockaded Woodpecker/future/RF")
+rffut <- raster("binaryRFavg.tif")
+
+#ME version
+
+setwd("D:/Argonne/SDM/Results/Red Cockaded Woodpecker/current/ME")
+mecurrent <- raster("binaryMEcurrent.tif")
+setwd("D:/Argonne/SDM/Results/Red Cockaded Woodpecker/future/ME")
+mefut <- raster("binaryMEavg.tif")
+mefut-mecurrent
+
+library(dismo)
+rcwCur <- raster("binaryRFMEcurrentRCW.tif")
+rcwFut <- raster("binaryRFMEfutureRCW.tif")
+rcwDif <- overlay(rcwCur,
+                       rcwFut,
+                       fun = function(r1, r2) { return( r1 - r2) })
+
+plot(rcwDif)
+writeRaster(rcwDif, "RCWLossOverTime.tif")\
+
+library(dismo)
+ssCur <- raster("binaryRFMEcurrentSS.tif")
+ssFut <- raster("binaryRFMEfutureSS.tif")
+ssDif <- overlay(ssCur,
+                  ssFut,
+                  fun = function(r1, r2) { return( r1 - r2) })
+
+plot(ssDif)
+writeRaster(ssDif, "SSLossOverTime.tif")
+
+####################################
+###########################################
+########skunk version of ME AND rF###########
+##########################################
+############################################
+#########################################
+setwd("D:/Argonne/SDM/Predictors/Current")
+
+library(dismo)
+library(rJava)
+library(raster)
+library(rgdal)
+library(ggplot2)
+library(foreign)
+ess=read.csv("SkunkOccurrences.csv")
+head(ess)
+envpredict=Sys.glob("*.tif")
+stck=stack()
+for(i in 1:NROW(envpredict)){
+  tempraster = raster(envpredict[i])
+  stck=stack(stck,tempraster)
+}
+na.omit(ess)
+## lines 12-15 is one command
+stck #raster predictors as a stackplot
+plot(stck,10)  
+head(ess) 
+points(ess,col='blue') #try to plot points didn't work
+group=kfold(ess, 5) #split the data into 5 portions, test model on all 5
+ess_train = ess[group !=1, ]
+ess_test = ess[group == 1, ]
+sxm = maxent(stck, ess_train)
+plot(sxm) #variable importance
+#Error message
+
+
+ext = extent(-93.5706589928,-75.01666526,23.5209528152,38.6080847708) #seUS
+# 40 background data points
+backg = randomPoints(stck, n=40,ext=ext, extf = 1.25)
+colnames(backg) = c('long', 'lat')
+group = kfold(backg, 5)
+
+#pseudo-absences for training model performances
+backg_train = backg[group != 1, ]
+backg_test = backg[group == 1, ]
+
+e = evaluate(ess_test, backg_test, sxm, stck)
+e
+plot(e, "ROC")
+
+p= predict(stck, sxm, ext=ext, progress='')
+
+#0ñ1 scale where 1 indicates the most suitable habitat 
+#and 0 least suitable habitat 
+
+par(mfrow=c(1,2))
+
+
+
+plot(p, main='Maxent Spotted Skunk Present Model')
+writeRaster(p, "ESS_ME.tif")
+
+
+#################FUTURE
+setwd("D:/Argonne/SDM/Predictors/Future/Future3b")
+require(raster)
+datafilesfut = Sys.glob("*.tif")
+datafilesfut #list of predictors
+stckF = stack() #create empty raster stack for storing rasters
+for(i in 1:NROW(datafilesfut)){
+  tempraster2=raster(datafilesfut[i])
+  stckF=stack(stckF,tempraster2)
+}
+p = predict(stckF, sxm) #use predict to implement the RF Model on raster data
+plot(p, main="ME SS Future Map 3b")
+writeRaster(p,"ess_MEFut3b.tif") #written to that working directory
+
+
+
+############
+################
+####################
+##########randomForest
+setwd("D:/Argonne/SDM/Predictors/Current")
+
+library(raster)
+library(rgdal)
+library(dismo)
+library(randomForest)
+library(maptools)
+library(sp)
+envpredict=Sys.glob("*.tif")
+stck=stack()
+for(i in 1:NROW(envpredict)){
+  tempraster = raster(envpredict[i])
+  stck=stack(stck,tempraster)
+}
+plot(stck,10)#trivial number, may have too many env factors
+ess=read.csv("SkunkOccurrences.csv")
+head(ess)
+
+points(ess,col='blue')
+set.seed(1)
+
+backgr = randomPoints(stck, 40) #40 random points
+essprs = extract(stck,ess)
+absvals = extract(stck, backgr) #choose absence values from the background
+
+head(absvals)
+pb = c(rep(1, nrow(essprs)), rep(0, nrow(absvals)))
+
+sdmdata = data.frame(cbind(pb, rbind(essprs, absvals)))
+
+
+#Combine presence and absence data
+
+head(sdmdata)
+sdmdata=na.omit(sdmdata)
+summary(sdmdata)
+
+write.csv(sdmdata, "ESS_PA_Data.csv")
+
+
+#######
+# NOW SPLIT DATA INTO TRAINING AND TESTING
+#######
+library (caret)
+
+set.seed(1) #pseudo-repeatability
+trainIndex = createDataPartition(sdmdata$pb, p = 0.75,
+                                 list = FALSE, times = 1) #y as basis of splitting 
+training = sdmdata[ trainIndex,] #75% data for model training
+testing = sdmdata[-trainIndex,] #25% data for model testing
+
+tail(training)
+#
+#
+#----------------------------
+# RANDOM FOREST
+#----------------------------
+
+set.seed(825)
+library(caret)
+#define train control --> 10 fold cv
+train_control = trainControl(method="cv", number=10)
+
+mod_fit = train(pb~.,data=training,trControl=train_control, method="rf", importance=TRUE)
+
+summary(mod_fit)
+varImp(mod_fit)
+varimpt=varImp(mod_fit)
+plot(varimpt, main='Variable Importance')
+##test the RF model
+p1 = predict(mod_fit, newdata=testing) #predict on the test data
+#
+#Develop AUC Curve for RF Model
+library(pROC)
+roc = pROC::roc(testing[,"pb"], p1) #compare testing data with predicted responses
+auc = pROC::auc(roc)
+plot(roc, main="Area Under the Curve")
+text(0.5,0.5, paste("AUC = ", format(auc, digits=5, scientific=FALSE)))
+#
+##Build the RF SDM Map
+require(raster)
+datafiles = Sys.glob("*.tif")
+datafiles #list of predictors
+stck = stack() #create empty raster stack for storing rasters
+for(i in 1:NROW(datafiles)){
+  tempraster=raster(datafiles[i])
+  stck=stack(stck,tempraster)
+}
+p = predict(stck, mod_fit) #use predict to implement the RF Model on raster data
+plot(p, main="RF Current Map SS")
+writeRaster(p,"RFCurrentSS.tif")
+
+#####FUTURE
+setwd("D:/Argonne/SDM/Predictors/Future/Future3b")
+require(raster)
+datafilesfut = Sys.glob("*.tif")
+datafilesfut #list of predictors
+stckF = stack() #create empty raster stack for storing rasters
+for(i in 1:NROW(datafilesfut)){
+  tempraster2=raster(datafilesfut[i])
+  stckF=stack(stckF,tempraster2)
+}
+p2 = predict(stckF, mod_fit) #use predict to implement the RF Model on raster data
+plot(p2, main="RF Skunk Future3b Map")
+writeRaster(p2,"ess_RFFut3b.tif") #written to that working directory
+
+
